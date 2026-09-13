@@ -4,11 +4,21 @@ node_modules/
 /frontend/node_modules/
 
 # Environment Variables & Secrets
-; .env
-; .env.local
-; .env.development.local
-; .env.test.local
-; .env.production.local
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production
+.env.production.local
+
+# Deployment infra kept local-only — not required for .github/workflows/deploy.yml
+# to run (Terraform/scripts are only ever run by hand, one time, from a local
+# machine); held back from this public repo, not just from git in general
+infra/terraform/
+infra/env.production.template
+scripts/
+DEPLOY.md
+CLAUDE.md
 
 # Production Builds (React / Frontend)
 build/

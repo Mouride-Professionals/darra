@@ -1,0 +1,128 @@
+# =============================================================================
+# Production Docker Compose — Daara Touba
+# Usage:  docker compose -f docker-compose.yml up -d
+# Requires: .env file with production values (see infra/env.production.template)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Application — Express API, also ships the built frontend (copied to the
+  # shared "public-data" volume at boot by docker/entrypoint.sh)
+  # ---------------------------------------------------------------------------
+  app:
+    image: registry.digitalocean.com/${DO_REGISTRY}/daara:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - public-data:/tmp/public
+    networks:
+      - app-network
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Nginx — stock image. Serves the built SPA from public-data and terminates
+  # TLS. Reloaded on every deploy so it re-resolves "app"'s new container IP.
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./infra/nginx:/etc/nginx/templates:ro
+      - public-data:/usr/share/nginx/html:ro
+      - certbot-webroot:/var/www/certbot:ro
+      - certbot-certs:/etc/letsencrypt:ro
+    networks:
+      - app-network
+    depends_on:
+      - app
+    # Periodically reload so renewed certs (written by the certbot container) are
+    # picked up without a manual restart — nginx only reads certs at startup/reload.
+    entrypoint: >
+      /bin/sh -c "
+        (while :; do sleep 6h; nginx -s reload; done) &
+        exec /docker-entrypoint.sh nginx -g 'daemon off;'
+      "
+
+  # ---------------------------------------------------------------------------
+  # Certbot — auto-renews Let's Encrypt SSL certificates every 12 hours
+  # ---------------------------------------------------------------------------
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - certbot-webroot:/var/www/certbot
+      - certbot-certs:/etc/letsencrypt
+    entrypoint: >
+      /bin/sh -c "
+        trap exit TERM;
+        while :; do
+          certbot renew --quiet --webroot --webroot-path=/var/www/certbot;
+          sleep 12h & wait $${!};
+        done
+      "
+
+  # ---------------------------------------------------------------------------
+  # MongoDB — self-hosted, not exposed to the host (in-network only)
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand({ping:1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Backup — nightly mongodump to a local volume (disk-only, not off-site;
+  # this deployment has no DO Spaces bucket to upload to)
+  # ---------------------------------------------------------------------------
+  backup:
+    image: mongo:7
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - mongo-backup:/backup
+    networks:
+      - app-network
+    depends_on:
+      - mongo
+    entrypoint: >
+      /bin/sh -c "
+        trap exit TERM;
+        while :; do
+          STAMP=$$(date +%Y%m%d-%H%M%S);
+          echo \"[backup] Dumping to /backup/$$STAMP...\";
+          mongodump --uri=\"$$MONGO_URI\" --out=/backup/$$STAMP && \
+            echo '[backup] Done.' || echo '[backup] mongodump failed.';
+          find /backup -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {} \; ;
+          sleep 24h & wait $${!};
+        done
+      "
+
+volumes:
+  public-data:
+  certbot-webroot:
+  certbot-certs:
+  mongo-data:
+  mongo-backup:
+
+networks:
+  app-network:
+    driver: bridge

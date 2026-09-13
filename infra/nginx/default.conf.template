@@ -1,0 +1,90 @@
+# =============================================================================
+# Nginx configuration template — Daara Touba production
+# DOMAIN env var is substituted at container startup by nginx:alpine's
+# built-in envsubst support for /etc/nginx/templates/*.template files.
+# =============================================================================
+
+# HTTP — redirect to HTTPS + ACME challenge for Let's Encrypt
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # Let's Encrypt ACME challenge (needed for cert issuance and renewal)
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # Redirect everything else to HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    # SSL certificates (managed by Certbot)
+    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+
+    # Modern SSL settings
+    ssl_session_timeout  1d;
+    ssl_session_cache    shared:SSL:10m;
+    ssl_session_tickets  off;
+    ssl_protocols        TLSv1.2 TLSv1.3;
+    ssl_ciphers          ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Frame-Options            "SAMEORIGIN"                          always;
+    add_header X-Content-Type-Options     "nosniff"                             always;
+    add_header Referrer-Policy            "strict-origin-when-cross-origin"     always;
+
+    root  /usr/share/nginx/html;
+    index index.html;
+
+    # Vite-built static assets — hashed filenames, immutable, 1-year cache
+    location ~* ^/assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    # Other static assets (images, fonts, icons)
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|webp)$ {
+        expires 30d;
+        add_header Cache-Control "public";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    # API — proxy to the app container on port 5001
+    # Use Docker's embedded DNS resolver (127.0.0.11) with a short TTL so
+    # nginx re-resolves "app" after each deploy instead of caching the old IP.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $app_upstream app:5001;
+
+    location /api/ {
+        proxy_pass         http://$app_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header    Host              $host;
+        proxy_set_header    X-Real-IP         $remote_addr;
+        proxy_set_header    X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto $scheme;
+    }
+
+    # React SPA routing — try file, then fall back to index.html
+    location / {
+        try_files $uri /index.html;
+    }
+
+    # Deny hidden files
+    location ~ /\. {
+        deny all;
+    }
+}

@@ -36,8 +36,6 @@ RUN npm ci --omit=dev
 # -----------------------------------------------------------------------------
 FROM node:20-alpine AS production
 
-RUN addgroup -S app && adduser -S app -G app
-
 WORKDIR /app
 
 COPY --from=backend-deps /app/backend/node_modules ./node_modules
@@ -48,10 +46,12 @@ COPY backend/ .
 COPY --from=frontend-builder /app/frontend/dist ./public
 
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && chown -R app:app /app
+RUN chmod +x /entrypoint.sh
 
-USER app
-
+# Runs as root: entrypoint.sh writes into the "public-data" volume, which
+# Docker creates owned by root regardless of image user — matches the
+# africadex Dockerfile this was modeled on, which does the same for the
+# same reason.
 EXPOSE 5001
 
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
